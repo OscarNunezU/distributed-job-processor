@@ -1,0 +1,24 @@
+# Node
+node_modules/
+dist/
+.env
+*.log
+coverage/
+
+# Go
+worker/bin/
+*.exe
+*.test
+*.out
+
+# Docker
+.docker/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
