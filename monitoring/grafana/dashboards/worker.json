@@ -1,0 +1,56 @@
+{
+  "title": "Job Processor - Worker",
+  "uid": "job-processor-worker",
+  "schemaVersion": 38,
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Jobs Completed / min",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(worker_jobs_completed_total[1m])) by (job_type)",
+          "legendFormat": "{{job_type}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Jobs Failed / min",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(worker_jobs_failed_total[1m])) by (job_type)",
+          "legendFormat": "{{job_type}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Job Duration p95 (seconds)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(worker_job_duration_seconds_bucket[5m])) by (le, job_type))",
+          "legendFormat": "p95 {{job_type}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Active Jobs",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "worker_active_jobs",
+          "legendFormat": "active"
+        }
+      ]
+    }
+  ]
+}
