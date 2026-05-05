@@ -14,7 +14,7 @@ describe('Jobs (e2e)', () => {
     app = module.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
     await app.init();
-  });
+  }, 60_000);
 
   afterAll(() => app.close());
 

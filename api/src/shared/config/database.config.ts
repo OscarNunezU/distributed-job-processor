@@ -7,7 +7,11 @@ export const databaseConfig = (config: ConfigService): TypeOrmModuleOptions => (
   url: config.getOrThrow<string>('POSTGRES_DSN'),
   entities: [Job],
   synchronize: false,
-  migrations: ['dist/migrations/*.js', 'src/migrations/*.ts'],
+  migrations: [
+    process.env.NODE_ENV === 'production'
+      ? 'dist/migrations/*.js'
+      : 'src/migrations/*.ts',
+  ],
   migrationsRun: true,
   logging: config.get('NODE_ENV') !== 'production',
   retryAttempts: 10,
