@@ -57,7 +57,7 @@ describe('JobsService', () => {
 
     it('does not publish if save fails', async () => {
       mockRepo.save.mockRejectedValue(new Error('db error'));
-      await expect(service.createJob({ type: 'email', payload: {}, maxAttempts: 3 })).rejects.toThrow('db error');
+      await expect(service.createJob({ type: 'email', payload: { to: 'fail@test.com' }, maxAttempts: 3 } as CreateJobDto)).rejects.toThrow('db error');
       expect(mockBroker.publish).not.toHaveBeenCalled();
     });
   });

@@ -16,7 +16,7 @@ export class JobsService {
     const job = new Job();
     job.id = uuidv4();
     job.type = dto.type;
-    job.payload = dto.payload;
+    job.payload = dto.payload as unknown as Record<string, unknown>;
     job.status = JobStatus.PENDING;
     job.attempts = 0;
     job.maxAttempts = dto.maxAttempts ?? 3;
