@@ -126,5 +126,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Prepare environment
+        run: cp .env.example .env
+
       - name: Build images
         run: docker compose build --no-cache
