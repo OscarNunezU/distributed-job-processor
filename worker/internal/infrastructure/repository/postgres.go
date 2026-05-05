@@ -4,33 +4,75 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	_ "github.com/lib/pq"
 	"github.com/OscarNunezU/distributed-job-processor/worker/internal/domain"
 )
 
 type PostgresJobRepository struct {
-	db *sql.DB
+	db               *sql.DB
+	stmtUpdateStatus *sql.Stmt
+	stmtIncrAttempts *sql.Stmt
 }
 
 func NewPostgresJobRepository(dsn string) (*PostgresJobRepository, error) {
-	db, err := sql.Open("postgres", dsn)
+	db, err := connectWithRetry(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("postgres open: %w", err)
+		return nil, err
 	}
-	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("postgres ping: %w", err)
-	}
-	return &PostgresJobRepository{db: db}, nil
-}
 
-func (r *PostgresJobRepository) UpdateStatus(ctx context.Context, jobID string, status domain.JobStatus, errMsg string) error {
-	const q = `
+	stmtUpdate, err := db.Prepare(`
 		UPDATE jobs
 		SET status = $1, error = $2, updated_at = NOW()
 		WHERE id = $3
-	`
-	_, err := r.db.ExecContext(ctx, q, string(status), errMsg, jobID)
+	`)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("prepare update status: %w", err)
+	}
+
+	stmtIncr, err := db.Prepare(`UPDATE jobs SET attempts = attempts + 1, updated_at = NOW() WHERE id = $1`)
+	if err != nil {
+		stmtUpdate.Close()
+		db.Close()
+		return nil, fmt.Errorf("prepare increment attempts: %w", err)
+	}
+
+	return &PostgresJobRepository{
+		db:               db,
+		stmtUpdateStatus: stmtUpdate,
+		stmtIncrAttempts: stmtIncr,
+	}, nil
+}
+
+func connectWithRetry(dsn string) (*sql.DB, error) {
+	const maxAttempts = 10
+	delay := time.Second
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		db, err := sql.Open("postgres", dsn)
+		if err != nil {
+			return nil, fmt.Errorf("postgres open: %w", err)
+		}
+		if err := db.Ping(); err != nil {
+			db.Close()
+			if attempt == maxAttempts {
+				return nil, fmt.Errorf("postgres ping after %d attempts: %w", maxAttempts, err)
+			}
+			time.Sleep(delay)
+			if delay < 30*time.Second {
+				delay *= 2
+			}
+			continue
+		}
+		return db, nil
+	}
+	return nil, fmt.Errorf("unreachable")
+}
+
+func (r *PostgresJobRepository) UpdateStatus(ctx context.Context, jobID string, status domain.JobStatus, errMsg string) error {
+	_, err := r.stmtUpdateStatus.ExecContext(ctx, string(status), errMsg, jobID)
 	if err != nil {
 		return fmt.Errorf("update job status: %w", err)
 	}
@@ -38,8 +80,7 @@ func (r *PostgresJobRepository) UpdateStatus(ctx context.Context, jobID string, 
 }
 
 func (r *PostgresJobRepository) IncrementAttempts(ctx context.Context, jobID string) error {
-	const q = `UPDATE jobs SET attempts = attempts + 1, updated_at = NOW() WHERE id = $1`
-	_, err := r.db.ExecContext(ctx, q, jobID)
+	_, err := r.stmtIncrAttempts.ExecContext(ctx, jobID)
 	if err != nil {
 		return fmt.Errorf("increment attempts: %w", err)
 	}
@@ -47,5 +88,7 @@ func (r *PostgresJobRepository) IncrementAttempts(ctx context.Context, jobID str
 }
 
 func (r *PostgresJobRepository) Close() error {
+	r.stmtUpdateStatus.Close()
+	r.stmtIncrAttempts.Close()
 	return r.db.Close()
 }

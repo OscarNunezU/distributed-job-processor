@@ -10,4 +10,6 @@ export const databaseConfig = (config: ConfigService): TypeOrmModuleOptions => (
   migrations: ['dist/migrations/*.js', 'src/migrations/*.ts'],
   migrationsRun: true,
   logging: config.get('NODE_ENV') !== 'production',
+  retryAttempts: 10,
+  retryDelay: 3_000,
 });

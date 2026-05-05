@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/OscarNunezU/distributed-job-processor/worker/internal/domain"
@@ -13,7 +14,6 @@ import (
 const (
 	mainQueue = "jobs"
 	dlQueue   = "jobs.dead"
-	exchange  = "jobs.exchange"
 	dlxName   = "jobs.dlx"
 )
 
@@ -24,25 +24,49 @@ type RabbitMQConsumer struct {
 }
 
 func NewRabbitMQConsumer(url string, log *logger.Logger) (*RabbitMQConsumer, error) {
-	conn, err := amqp.Dial(url)
+	conn, ch, err := dialWithRetry(url, log)
 	if err != nil {
-		return nil, fmt.Errorf("rabbitmq dial: %w", err)
-	}
-
-	ch, err := conn.Channel()
-	if err != nil {
-		return nil, fmt.Errorf("rabbitmq channel: %w", err)
-	}
-
-	if err := ch.Qos(10, 0, false); err != nil {
-		return nil, fmt.Errorf("rabbitmq qos: %w", err)
-	}
-
-	if err := declareTopology(ch); err != nil {
 		return nil, err
 	}
-
+	if err := declareTopology(ch); err != nil {
+		conn.Close()
+		return nil, err
+	}
 	return &RabbitMQConsumer{conn: conn, channel: ch, log: log}, nil
+}
+
+func dialWithRetry(url string, log *logger.Logger) (*amqp.Connection, *amqp.Channel, error) {
+	const maxAttempts = 10
+	delay := time.Second
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		conn, err := amqp.Dial(url)
+		if err != nil {
+			if attempt == maxAttempts {
+				return nil, nil, fmt.Errorf("rabbitmq dial after %d attempts: %w", maxAttempts, err)
+			}
+			log.Warn("rabbitmq connection failed, retrying", "attempt", attempt, "delay_s", delay.Seconds())
+			time.Sleep(delay)
+			if delay < 30*time.Second {
+				delay *= 2
+			}
+			continue
+		}
+
+		ch, err := conn.Channel()
+		if err != nil {
+			conn.Close()
+			return nil, nil, fmt.Errorf("rabbitmq channel: %w", err)
+		}
+
+		if err := ch.Qos(10, 0, false); err != nil {
+			conn.Close()
+			return nil, nil, fmt.Errorf("rabbitmq qos: %w", err)
+		}
+
+		return conn, ch, nil
+	}
+	return nil, nil, fmt.Errorf("unreachable")
 }
 
 func declareTopology(ch *amqp.Channel) error {
@@ -58,9 +82,7 @@ func declareTopology(ch *amqp.Channel) error {
 		return fmt.Errorf("bind dlq: %w", err)
 	}
 
-	args := amqp.Table{
-		"x-dead-letter-exchange": dlxName,
-	}
+	args := amqp.Table{"x-dead-letter-exchange": dlxName}
 	if _, err := ch.QueueDeclare(mainQueue, true, false, false, false, args); err != nil {
 		return fmt.Errorf("declare main queue: %w", err)
 	}
@@ -74,20 +96,32 @@ func (c *RabbitMQConsumer) Consume(_ context.Context) (<-chan domain.JobMessage,
 		return nil, fmt.Errorf("rabbitmq consume: %w", err)
 	}
 
+	connClose := c.conn.NotifyClose(make(chan *amqp.Error, 1))
 	out := make(chan domain.JobMessage, 64)
 	go func() {
 		defer close(out)
-		for d := range deliveries {
-			var job domain.Job
-			if err := json.Unmarshal(d.Body, &job); err != nil {
-				c.log.Error("failed to unmarshal job", "error", err)
-				_ = d.Nack(false, false)
-				continue
-			}
-			out <- domain.JobMessage{
-				Job:         &job,
-				RawBody:     d.Body,
-				DeliveryTag: d.DeliveryTag,
+		for {
+			select {
+			case d, ok := <-deliveries:
+				if !ok {
+					return
+				}
+				var job domain.Job
+				if err := json.Unmarshal(d.Body, &job); err != nil {
+					c.log.Error("failed to unmarshal job", "error", err)
+					_ = d.Nack(false, false)
+					continue
+				}
+				out <- domain.JobMessage{
+					Job:         &job,
+					RawBody:     d.Body,
+					DeliveryTag: d.DeliveryTag,
+				}
+			case err := <-connClose:
+				if err != nil {
+					c.log.Error("rabbitmq connection lost", "error", err)
+				}
+				return
 			}
 		}
 	}()

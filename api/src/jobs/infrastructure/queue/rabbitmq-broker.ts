@@ -18,7 +18,7 @@ export class RabbitMQBroker implements MessageBrokerPort, OnModuleInit, OnModule
 
   async onModuleInit(): Promise<void> {
     const url = this.config.getOrThrow<string>('RABBITMQ_URL');
-    this.connection = await amqp.connect(url);
+    this.connection = await this.connectWithRetry(url);
     this.channel = await this.connection.createChannel();
 
     // Mirror the topology declared by the worker so both services agree
@@ -31,6 +31,23 @@ export class RabbitMQBroker implements MessageBrokerPort, OnModuleInit, OnModule
     });
 
     this.logger.log('Connected to RabbitMQ');
+  }
+
+  private async connectWithRetry(url: string, maxAttempts = 10): Promise<amqp.ChannelModel> {
+    let delay = 1_000;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await amqp.connect(url);
+      } catch (err) {
+        if (attempt === maxAttempts) throw err;
+        this.logger.warn(
+          `RabbitMQ connection attempt ${attempt}/${maxAttempts} failed — retrying in ${delay}ms`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        delay = Math.min(delay * 2, 30_000);
+      }
+    }
+    throw new Error('unreachable');
   }
 
   async publish(job: Job): Promise<void> {
