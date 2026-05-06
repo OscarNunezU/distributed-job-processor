@@ -37,9 +37,12 @@ distributed-job-processor/
 │   └── src/
 │       ├── jobs/
 │       │   ├── domain/           # Entities, repository & broker ports
-│       │   ├── application/      # Use cases, DTOs
+│       │   ├── application/      # Use cases, DTOs with per-type payload validation
 │       │   └── infrastructure/   # TypeORM, RabbitMQ, HTTP controllers
-│       └── shared/               # Global config, exception filters
+│       └── shared/
+│           ├── config/           # Database config
+│           ├── filters/          # Global exception filter
+│           └── guards/           # ApiKeyGuard, applied globally
 ├── worker/                       # Go async worker
 │   ├── cmd/worker/               # Entrypoint + config
 │   └── internal/
@@ -65,15 +68,27 @@ distributed-job-processor/
 ### Run
 
 ```bash
+cp .env.example .env   # adjust values as needed
 docker compose up --build
 ```
 
-| Service       | URL                              |
-|---------------|----------------------------------|
-| API           | http://localhost:3000            |
-| RabbitMQ UI   | http://localhost:15672 (guest/guest) |
-| Prometheus    | http://localhost:9091            |
-| Grafana       | http://localhost:3001 (admin/admin) |
+| Service       | URL                                    |
+|---------------|----------------------------------------|
+| API           | http://localhost:3000                  |
+| RabbitMQ UI   | http://localhost:15672 (guest / guest) |
+| Prometheus    | http://localhost:9091                  |
+| Grafana       | http://localhost:3001 (admin / admin)  |
+
+## Authentication
+
+All API endpoints require an `X-API-Key` header validated against the `API_KEY` environment variable. If `API_KEY` is not set, the guard is skipped (useful for local development without config).
+
+```bash
+# All requests must include:
+-H "X-API-Key: your-api-key"
+```
+
+A missing or incorrect key returns `401 Unauthorized`.
 
 ## Manual Testing
 
@@ -85,16 +100,19 @@ Once all services are running, follow these steps to verify the full flow.
 # email job
 curl -s -X POST http://localhost:3000/jobs \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
   -d '{"type":"email","payload":{"to":"user@example.com","subject":"Hello"},"maxAttempts":3}' | jq
 
 # report job
 curl -s -X POST http://localhost:3000/jobs \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
   -d '{"type":"report","payload":{"report_type":"monthly"},"maxAttempts":3}' | jq
 
 # data-processing job
 curl -s -X POST http://localhost:3000/jobs \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
   -d '{"type":"data-processing","payload":{"source":"s3://bucket/file.csv"},"maxAttempts":3}' | jq
 ```
 
@@ -103,8 +121,8 @@ Each response will have `"status": "pending"`. The worker processes it within mi
 ### 2. Check job status
 
 ```bash
-# replace <id> with the id from the previous response
-curl -s http://localhost:3000/jobs/<id> | jq
+curl -s http://localhost:3000/jobs/<id> \
+  -H "X-API-Key: your-api-key" | jq
 ```
 
 Expected: `"status": "completed"`, `"attempts": 1`.
@@ -112,15 +130,24 @@ Expected: `"status": "completed"`, `"attempts": 1`.
 ### 3. List all jobs
 
 ```bash
-curl -s "http://localhost:3000/jobs?limit=10&offset=0" | jq
+curl -s "http://localhost:3000/jobs?limit=10&offset=0" \
+  -H "X-API-Key: your-api-key" | jq
 ```
 
-### 4. Verify validation (should return 400)
+### 4. Verify payload validation (should return 400)
 
 ```bash
+# invalid job type
 curl -s -X POST http://localhost:3000/jobs \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
   -d '{"type":"unknown-type","payload":{}}' | jq
+
+# email job missing required field "to"
+curl -s -X POST http://localhost:3000/jobs \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{"type":"email","payload":{"subject":"no recipient"}}' | jq
 ```
 
 ### 5. Check worker metrics
@@ -162,12 +189,23 @@ cd worker && go test ./... -race -v
 
 ## API Reference
 
+### Authentication
+
+All endpoints require the `X-API-Key` header:
+
+```
+X-API-Key: your-api-key
+```
+
 ### Create a job
 
-```bash
+```
 POST /jobs
 Content-Type: application/json
+X-API-Key: your-api-key
+```
 
+```json
 {
   "type": "email",
   "payload": {
@@ -192,27 +230,31 @@ Content-Type: application/json
 
 ### Get job status
 
-```bash
+```
 GET /jobs/:id
+X-API-Key: your-api-key
 ```
 
 ### List jobs
 
-```bash
+```
 GET /jobs?limit=20&offset=0
+X-API-Key: your-api-key
 ```
 
 ## Supported Job Types
 
-| Type              | Required payload fields         |
-|-------------------|---------------------------------|
-| `email`           | `to` (string)                   |
-| `report`          | `report_type` (string)          |
-| `data-processing` | `source` (string)               |
+| Type              | Required payload fields |
+|-------------------|-------------------------|
+| `email`           | `to` (email string)     |
+| `report`          | `report_type` (string)  |
+| `data-processing` | `source` (string)       |
+
+Payload shape is validated at the API boundary using per-type DTOs (`EmailPayloadDto`, `ReportPayloadDto`, `DataProcessingPayloadDto`). Invalid payloads are rejected with `400` before reaching the queue.
 
 ## Adding a New Job Type
 
-1. Create a handler in `worker/internal/application/handlers/`:
+**1.** Create a handler in `worker/internal/application/handlers/`:
 
 ```go
 type MyHandler struct{ log *logger.Logger }
@@ -223,16 +265,23 @@ func (h *MyHandler) Handle(ctx context.Context, job *domain.Job) error {
 }
 ```
 
-2. Register it in `worker/cmd/worker/main.go`:
+**2.** Register it in `worker/cmd/worker/main.go`:
 
 ```go
 reg.Register("my-new-type", handlers.NewMyHandler(log))
 ```
 
-3. Add the type to the allowed list in `api/src/jobs/application/create-job.dto.ts`:
+**3.** Add a payload DTO and register the type in `api/src/jobs/application/create-job.dto.ts`:
 
 ```ts
+export class MyNewTypePayloadDto {
+  @IsString() @IsNotEmpty() requiredField!: string;
+}
+
 const VALID_JOB_TYPES = ['email', 'report', 'data-processing', 'my-new-type'] as const;
+
+// add to resolvePayloadType map:
+'my-new-type': MyNewTypePayloadDto,
 ```
 
 No other changes required — the architecture is closed for modification, open for extension.
@@ -241,32 +290,33 @@ No other changes required — the architecture is closed for modification, open 
 
 ### API environment variables
 
-| Variable       | Description              | Default     |
-|----------------|--------------------------|-------------|
-| `PORT`         | HTTP port                | `3000`      |
-| `POSTGRES_DSN` | PostgreSQL connection URL | required   |
-| `RABBITMQ_URL` | RabbitMQ AMQP URL        | required    |
+| Variable       | Description                        | Default    |
+|----------------|------------------------------------|------------|
+| `PORT`         | HTTP port                          | `3000`     |
+| `API_KEY`      | API key required in X-API-Key header | —        |
+| `POSTGRES_DSN` | PostgreSQL connection URL          | required   |
+| `RABBITMQ_URL` | RabbitMQ AMQP URL                  | required   |
 
 ### Worker environment variables
 
-| Variable              | Description                      | Default |
-|-----------------------|----------------------------------|---------|
-| `POSTGRES_DSN`        | PostgreSQL connection URL        | required |
-| `RABBITMQ_URL`        | RabbitMQ AMQP URL                | required |
-| `WORKER_CONCURRENCY`  | Number of parallel goroutines    | `5`      |
-| `JOB_TIMEOUT_SECONDS` | Max processing time per job      | `30`     |
-| `METRICS_PORT`        | Prometheus metrics port          | `9090`   |
+| Variable              | Description                   | Default  |
+|-----------------------|-------------------------------|----------|
+| `POSTGRES_DSN`        | PostgreSQL connection URL     | required |
+| `RABBITMQ_URL`        | RabbitMQ AMQP URL             | required |
+| `WORKER_CONCURRENCY`  | Number of parallel goroutines | `5`      |
+| `JOB_TIMEOUT_SECONDS` | Max processing time per job   | `30`     |
+| `METRICS_PORT`        | Prometheus metrics port       | `9090`   |
 
 ## Observability
 
 The worker exposes Prometheus metrics at `:9090/metrics`:
 
-| Metric                             | Type      | Description                        |
-|------------------------------------|-----------|------------------------------------|
-| `worker_jobs_completed_total`      | Counter   | Jobs completed, by type            |
-| `worker_jobs_failed_total`         | Counter   | Jobs failed, by type               |
-| `worker_job_duration_seconds`      | Histogram | Processing duration, by type       |
-| `worker_active_jobs`               | Gauge     | Currently processing jobs          |
+| Metric                        | Type      | Description                    |
+|-------------------------------|-----------|--------------------------------|
+| `worker_jobs_completed_total` | Counter   | Jobs completed, by type        |
+| `worker_jobs_failed_total`    | Counter   | Jobs failed, by type           |
+| `worker_job_duration_seconds` | Histogram | Processing duration, by type   |
+| `worker_active_jobs`          | Gauge     | Currently processing jobs      |
 
 Grafana dashboard is auto-provisioned at startup.
 
@@ -309,6 +359,16 @@ Grafana dashboard is auto-provisioned at startup.
 **Decision:** PostgreSQL with a UUID primary key. The job `id` is generated by the API before publishing, making the worker idempotent by design — re-processing the same message produces the same `UPDATE`.
 
 **Consequence:** No distributed transaction needed between queue publish and DB write. The worst case is a duplicate `UPDATE` with the same data.
+
+---
+
+### ADR-005 — API key over JWT for service authentication
+
+**Context:** The API needs protection against unauthorized access. The primary consumers are internal services and developer tooling, not end users with sessions.
+
+**Decision:** Static API key validated via `X-API-Key` header, enforced by a global NestJS guard. JWT adds key rotation complexity and a token validation step that is not justified for service-to-service communication at this stage.
+
+**Consequence:** Key rotation requires redeploying with a new `API_KEY` env var. Acceptable for v1; upgrading to JWT means replacing `ApiKeyGuard` with a Passport strategy — no controller changes required.
 
 ## Roadmap
 
