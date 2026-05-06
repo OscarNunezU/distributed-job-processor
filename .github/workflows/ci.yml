@@ -87,6 +87,7 @@ jobs:
         env:
           POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/jobprocessor_test
           RABBITMQ_URL: amqp://guest:guest@localhost:5672
+          API_KEY: test-api-key
 
   worker:
     name: Worker (Go)

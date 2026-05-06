@@ -5,6 +5,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { databaseConfig } from './shared/config/database.config';
 import { JobsModule } from './jobs/jobs.module';
+import { ApiKeyGuard } from './shared/guards/api-key.guard';
 
 @Module({
   imports: [
@@ -16,6 +17,9 @@ import { JobsModule } from './jobs/jobs.module';
     }),
     JobsModule,
   ],
-  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
+  providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: ApiKeyGuard },
+  ],
 })
 export class AppModule {}
