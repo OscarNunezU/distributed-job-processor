@@ -42,6 +42,7 @@ services:
       PORT: 3000
       POSTGRES_DSN: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      API_KEY: ${API_KEY}
     depends_on:
       postgres:
         condition: service_healthy
@@ -64,6 +65,19 @@ services:
       postgres:
         condition: service_healthy
       rabbitmq:
+        condition: service_healthy
+
+  query-service:
+    build:
+      context: ./query-service
+      dockerfile: Dockerfile
+    ports:
+      - "${GRPC_PORT:-50051}:50051"
+    environment:
+      POSTGRES_DSN: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      GRPC_PORT: 50051
+    depends_on:
+      postgres:
         condition: service_healthy
 
   prometheus:
