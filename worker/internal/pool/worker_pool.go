@@ -5,6 +5,10 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/OscarNunezU/distributed-job-processor/worker/internal/application/registry"
 	"github.com/OscarNunezU/distributed-job-processor/worker/internal/domain"
 	"github.com/OscarNunezU/distributed-job-processor/worker/internal/infrastructure/logger"
@@ -67,8 +71,12 @@ func (wp *WorkerPool) Run(ctx context.Context, messages <-chan domain.JobMessage
 }
 
 func (wp *WorkerPool) process(ctx context.Context, msg domain.JobMessage, consumer domain.MessageConsumer) {
+	// Continue the distributed trace started by the API via W3C traceparent header.
+	ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(msg.TraceHeaders))
+
 	job := msg.Job
-	log := wp.log.With("job_id", job.ID, "job_type", job.Type, "attempt", job.Attempts+1)
+	traceID := trace.SpanFromContext(ctx).SpanContext().TraceID().String()
+	log := wp.log.With("job_id", job.ID, "job_type", job.Type, "attempt", job.Attempts+1, "trace_id", traceID)
 
 	jobCtx, cancel := context.WithTimeout(ctx, wp.timeout)
 	defer cancel()

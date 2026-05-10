@@ -4,10 +4,18 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+
 	"github.com/OscarNunezU/distributed-job-processor/worker/internal/application/handlers"
 	"github.com/OscarNunezU/distributed-job-processor/worker/internal/application/registry"
 	"github.com/OscarNunezU/distributed-job-processor/worker/internal/infrastructure/logger"
@@ -24,6 +32,20 @@ func main() {
 	if err != nil {
 		log.Error("failed to load config", "error", err)
 		panic(err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// OTel tracer — optional, worker continues without it if Tempo is unavailable.
+	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" {
+		shutdown, err := initTracer(ctx)
+		if err != nil {
+			log.Warn("tracing unavailable", "error", err)
+		} else {
+			defer shutdown(ctx) //nolint:errcheck
+			log.Info("tracing enabled", "endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+		}
 	}
 
 	// Infrastructure
@@ -54,9 +76,6 @@ func main() {
 	// Worker pool
 	wp := pool.New(cfg.Concurrency, cfg.JobTimeout, reg, repo, m, log)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
 	// Metrics server
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", m.Handler())
@@ -79,4 +98,27 @@ func main() {
 
 	wp.Run(ctx, messages, consumer)
 	log.Info("worker stopped gracefully")
+}
+
+func initTracer(ctx context.Context) (func(context.Context) error, error) {
+	exporter, err := otlptracehttp.New(ctx) // reads OTEL_EXPORTER_OTLP_ENDPOINT
+	if err != nil {
+		return nil, fmt.Errorf("otlp exporter: %w", err)
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(resource.NewWithAttributes(
+			semconv.SchemaURL,
+			semconv.ServiceName(getEnv("OTEL_SERVICE_NAME", "worker")),
+		)),
+	)
+
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+
+	return tp.Shutdown, nil
 }

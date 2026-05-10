@@ -112,10 +112,17 @@ func (c *RabbitMQConsumer) Consume(_ context.Context) (<-chan domain.JobMessage,
 					_ = d.Nack(false, false)
 					continue
 				}
+				traceHeaders := make(map[string]string, len(d.Headers))
+				for k, v := range d.Headers {
+					if s, ok := v.(string); ok {
+						traceHeaders[k] = s
+					}
+				}
 				out <- domain.JobMessage{
-					Job:         &job,
-					RawBody:     d.Body,
-					DeliveryTag: d.DeliveryTag,
+					Job:          &job,
+					RawBody:      d.Body,
+					DeliveryTag:  d.DeliveryTag,
+					TraceHeaders: traceHeaders,
 				}
 			case err := <-connClose:
 				if err != nil {
