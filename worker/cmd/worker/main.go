@@ -47,9 +47,9 @@ func main() {
 
 	// Handler registry — add new job types here
 	reg := registry.New()
-	reg.Register("email", handlers.NewEmailHandler(log))
-	reg.Register("report", handlers.NewReportHandler(log))
-	reg.Register("data-processing", handlers.NewDataProcessingHandler(log))
+	reg.Register("email", handlers.NewInstrumented(handlers.NewEmailHandler(log), "email", m))
+	reg.Register("report", handlers.NewInstrumented(handlers.NewReportHandler(log), "report", m))
+	reg.Register("data-processing", handlers.NewInstrumented(handlers.NewDataProcessingHandler(log), "data-processing", m))
 
 	// Worker pool
 	wp := pool.New(cfg.Concurrency, cfg.JobTimeout, reg, repo, m, log)

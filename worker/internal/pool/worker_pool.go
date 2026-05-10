@@ -89,20 +89,16 @@ func (wp *WorkerPool) process(ctx context.Context, msg domain.JobMessage, consum
 		return
 	}
 
-	start := time.Now()
 	err = handler.Handle(jobCtx, job)
-	duration := time.Since(start).Seconds()
 
 	if err != nil {
-		log.Error("job failed", "error", err, "duration_s", duration)
-		wp.metrics.JobFailed(job.Type)
+		log.Error("job failed", "error", err)
 		requeue := job.CanRetry()
 		wp.fail(ctx, msg, consumer, job, err.Error(), requeue)
 		return
 	}
 
-	wp.metrics.JobCompleted(job.Type, duration)
-	log.Info("job completed", "duration_s", duration)
+	log.Info("job completed")
 
 	if err := wp.repo.UpdateStatus(ctx, job.ID, domain.StatusCompleted, ""); err != nil {
 		log.Error("failed to update status to completed", "error", err)
