@@ -5,22 +5,24 @@ A production-ready distributed system for asynchronous job processing using Nest
 ## Architecture Overview
 
 ```
-┌─────────────┐     HTTP      ┌─────────────────┐     AMQP      ┌──────────────────┐
-│   Client    │──────────────▶│   API (NestJS)  │──────────────▶│  RabbitMQ        │
-└─────────────┘               └────────┬────────┘               └────────┬─────────┘
-                                        │                                  │
-                                        │ SQL                              │ consume
-                                        ▼                                  ▼
-                               ┌─────────────────┐               ┌──────────────────┐
-                               │   PostgreSQL    │◀──────────────│  Worker (Go)     │
-                               └─────────────────┘   SQL update  └────────┬─────────┘
-                                                                           │ /metrics
-                                                                           ▼
-                                                                  ┌──────────────────┐
-                                                                  │  Prometheus      │
-                                                                  │  Grafana         │
-                                                                  └──────────────────┘
+                        WRITE PATH
+┌─────────────┐   HTTP    ┌─────────────────┐   AMQP   ┌──────────────────┐
+│   Client    │──────────▶│   API (NestJS)  │─────────▶│  RabbitMQ        │
+└─────────────┘           └────────┬────────┘          └────────┬─────────┘
+                                   │ SQL INSERT                  │ consume
+                                   ▼                             ▼
+                          ┌─────────────────┐          ┌──────────────────┐
+                          │   PostgreSQL    │◀──────────│  Worker (Go)     │
+                          └────────┬────────┘ SQL UPDATE└────────┬─────────┘
+                                   │                             │ /metrics
+                        READ PATH  │                             ▼
+┌─────────────┐  gRPC   ┌──────────┴──────┐           ┌──────────────────┐
+│  Internal   │────────▶│ query-service   │           │  Prometheus      │
+│  Service    │         │    (Go gRPC)    │           │  Grafana         │
+└─────────────┘         └─────────────────┘           └──────────────────┘
 ```
+
+Write path: HTTP → RabbitMQ (async, via API). Read path: gRPC → PostgreSQL (sync, via query-service). Both paths share the same database; neither path depends on the other.
 
 ### Job Lifecycle
 
@@ -33,7 +35,9 @@ pending → processing → completed
 
 ```
 distributed-job-processor/
-├── api/                          # NestJS HTTP API
+├── proto/
+│   └── job.proto                 # Protobuf contract (source of truth for gRPC)
+├── api/                          # NestJS HTTP API (write path)
 │   └── src/
 │       ├── jobs/
 │       │   ├── domain/           # Entities, repository & broker ports
@@ -42,19 +46,26 @@ distributed-job-processor/
 │       └── shared/
 │           ├── config/           # Database config
 │           ├── filters/          # Global exception filter
-│           └── guards/           # ApiKeyGuard, applied globally
+│           └── guards/           # ApiKeyGuard, ThrottlerGuard (applied globally)
 ├── worker/                       # Go async worker
 │   ├── cmd/worker/               # Entrypoint + config
 │   └── internal/
 │       ├── domain/               # Job entity, ports (interfaces)
 │       ├── application/          # Handler registry + job handlers
-│       │   ├── registry/         # Dynamic handler registry
-│       │   └── handlers/         # email, report, data-processing
+│       │   ├── registry/         # Dynamic handler registry (Strategy pattern)
+│       │   └── handlers/         # email, report, data-processing + InstrumentedHandler
 │       ├── infrastructure/       # RabbitMQ consumer, PostgreSQL repo, metrics
-│       └── pool/                 # Concurrent worker pool
+│       └── pool/                 # Concurrent worker pool (Bulkhead pattern)
+├── query-service/                # Go gRPC query service (read path)
+│   ├── cmd/server/               # Entrypoint + wiring
+│   ├── gen/job/                  # Generated protobuf Go code (do not edit)
+│   └── internal/
+│       ├── repository/           # PostgreSQL read-only repository
+│       └── server/               # gRPC server implementation
 ├── monitoring/
 │   ├── prometheus/               # Scrape config
 │   └── grafana/                  # Datasources + pre-built dashboard
+├── Makefile                      # make proto — regenerates Go code from job.proto
 ├── .github/workflows/            # CI: lint + test + build + docker
 └── docs/adr/                     # Architecture Decision Records
 ```
@@ -72,12 +83,13 @@ cp .env.example .env   # adjust values as needed
 docker compose up --build
 ```
 
-| Service       | URL                                    |
-|---------------|----------------------------------------|
-| API           | http://localhost:3000                  |
-| RabbitMQ UI   | http://localhost:15672 (guest / guest) |
-| Prometheus    | http://localhost:9091                  |
-| Grafana       | http://localhost:3001 (admin / admin)  |
+| Service           | URL / Address                          |
+|-------------------|----------------------------------------|
+| API               | http://localhost:3000                  |
+| Query Service     | localhost:50051 (gRPC)                 |
+| RabbitMQ UI       | http://localhost:15672 (guest / guest) |
+| Prometheus        | http://localhost:9091                  |
+| Grafana           | http://localhost:3001 (admin / admin)  |
 
 ## Authentication
 
@@ -169,7 +181,36 @@ worker_active_jobs 0
 Open http://localhost:15672 (guest / guest) → Queues tab.
 You should see `jobs` and `jobs.dead` queues with 0 messages ready.
 
-### 7. Check Grafana dashboard
+### 7. Query jobs via gRPC
+
+Once a job is created its ID can be queried directly through the gRPC query-service. Requires [grpcurl](https://github.com/fullstorydev/grpcurl).
+
+```bash
+# list available services (uses server reflection — no .proto file needed)
+grpcurl -plaintext localhost:50051 list
+
+# get a specific job
+grpcurl -plaintext -d '{"id": "<job-id>"}' localhost:50051 job.JobService/GetJob
+
+# list jobs with pagination
+grpcurl -plaintext -d '{"limit": 10, "offset": 0}' localhost:50051 job.JobService/ListJobs
+```
+
+Expected `GetJob` response:
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "type": "email",
+  "status": "completed",
+  "attempts": 1,
+  "maxAttempts": 3,
+  "createdAt": "2024-04-26T10:00:00Z"
+}
+```
+
+gRPC error codes: `NOT_FOUND` (job does not exist), `INVALID_ARGUMENT` (missing id), `INTERNAL` (infrastructure failure).
+
+### 8. Check Grafana dashboard
 
 Open http://localhost:3001 (admin / admin) → Dashboards → Job Processor - Worker.
 The dashboard shows completed/failed jobs per minute, p95 latency, and active jobs.
@@ -307,6 +348,13 @@ No other changes required — the architecture is closed for modification, open 
 | `JOB_TIMEOUT_SECONDS` | Max processing time per job   | `30`     |
 | `METRICS_PORT`        | Prometheus metrics port       | `9090`   |
 
+### Query Service environment variables
+
+| Variable       | Description               | Default  |
+|----------------|---------------------------|----------|
+| `POSTGRES_DSN` | PostgreSQL connection URL | required |
+| `GRPC_PORT`    | gRPC server port          | `50051`  |
+
 ## Observability
 
 The worker exposes Prometheus metrics at `:9090/metrics`:
@@ -319,6 +367,39 @@ The worker exposes Prometheus metrics at `:9090/metrics`:
 | `worker_active_jobs`          | Gauge     | Currently processing jobs      |
 
 Grafana dashboard is auto-provisioned at startup.
+
+## gRPC Reference
+
+The query-service exposes a gRPC server defined by `proto/job.proto`. It is the **source of truth** — regenerate Go code with `make proto` whenever the contract changes.
+
+### GetJob
+
+```
+rpc GetJob(GetJobRequest) returns (JobResponse)
+```
+
+| Field | Type   | Required |
+|-------|--------|----------|
+| `id`  | string | yes (UUID format) |
+
+### ListJobs
+
+```
+rpc ListJobs(ListJobsRequest) returns (ListJobsResponse)
+```
+
+| Field    | Type  | Default |
+|----------|-------|---------|
+| `limit`  | int32 | `20`    |
+| `offset` | int32 | `0`     |
+
+### Error codes
+
+| gRPC status        | Meaning                          |
+|--------------------|----------------------------------|
+| `NOT_FOUND`        | Job does not exist               |
+| `INVALID_ARGUMENT` | Required field missing or empty  |
+| `INTERNAL`         | Infrastructure failure           |
 
 ## Architecture Decision Records
 
@@ -369,6 +450,16 @@ Grafana dashboard is auto-provisioned at startup.
 **Decision:** Static API key validated via `X-API-Key` header, enforced by a global NestJS guard. JWT adds key rotation complexity and a token validation step that is not justified for service-to-service communication at this stage.
 
 **Consequence:** Key rotation requires redeploying with a new `API_KEY` env var. Acceptable for v1; upgrading to JWT means replacing `ApiKeyGuard` with a Passport strategy — no controller changes required.
+
+### ADR-006 — Separate Go gRPC service for the read path
+
+**Context:** The system needs an internal service-to-service query interface with typed contracts and better performance than REST for reads. The API already handles the write path.
+
+**Decision:** A dedicated Go microservice (`query-service`) exposing a gRPC server defined by `proto/job.proto`. The contract lives outside any single service so any team can consume it independently. The service connects only to PostgreSQL — it has no dependency on RabbitMQ, so a broker failure does not affect reads.
+
+**Consequence:** Write path (HTTP → RabbitMQ → Worker) and read path (gRPC → PostgreSQL) are independently deployable and scalable. Adding a new query method = update the proto, regenerate, implement the method. No changes to the API or worker.
+
+---
 
 ## Roadmap
 
