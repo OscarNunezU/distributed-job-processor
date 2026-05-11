@@ -34,7 +34,7 @@ func New(dsn string) (*PostgresJobRepository, error) {
 		`SELECT id, type, status, attempts, max_attempts, created_at FROM jobs WHERE id = $1`,
 	)
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("prepare findByID: %w", err)
 	}
 
@@ -42,8 +42,8 @@ func New(dsn string) (*PostgresJobRepository, error) {
 		`SELECT id, type, status, attempts, max_attempts, created_at FROM jobs ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
 	)
 	if err != nil {
-		stmtFindByID.Close()
-		db.Close()
+		_ = stmtFindByID.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("prepare findAll: %w", err)
 	}
 
@@ -68,7 +68,7 @@ func (r *PostgresJobRepository) FindAll(ctx context.Context, limit, offset int32
 	if err != nil {
 		return nil, 0, fmt.Errorf("findAll: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var jobs []*Job
 	for rows.Next() {
@@ -88,9 +88,9 @@ func (r *PostgresJobRepository) FindAll(ctx context.Context, limit, offset int32
 }
 
 func (r *PostgresJobRepository) Close() {
-	r.stmtFindByID.Close()
-	r.stmtFindAll.Close()
-	r.db.Close()
+	_ = r.stmtFindByID.Close()
+	_ = r.stmtFindAll.Close()
+	_ = r.db.Close()
 }
 
 func connectWithRetry(dsn string) (*sql.DB, error) {
@@ -102,7 +102,7 @@ func connectWithRetry(dsn string) (*sql.DB, error) {
 			return nil, fmt.Errorf("postgres open: %w", err)
 		}
 		if err := db.Ping(); err != nil {
-			db.Close()
+			_ = db.Close()
 			if attempt == maxAttempts {
 				return nil, fmt.Errorf("postgres ping after %d attempts: %w", maxAttempts, err)
 			}

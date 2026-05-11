@@ -28,14 +28,14 @@ func NewPostgresJobRepository(dsn string) (*PostgresJobRepository, error) {
 		WHERE id = $3
 	`)
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("prepare update status: %w", err)
 	}
 
 	stmtIncr, err := db.Prepare(`UPDATE jobs SET attempts = attempts + 1, updated_at = NOW() WHERE id = $1 RETURNING attempts`)
 	if err != nil {
-		stmtUpdate.Close()
-		db.Close()
+		_ = stmtUpdate.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("prepare increment attempts: %w", err)
 	}
 
@@ -56,7 +56,7 @@ func connectWithRetry(dsn string) (*sql.DB, error) {
 			return nil, fmt.Errorf("postgres open: %w", err)
 		}
 		if err := db.Ping(); err != nil {
-			db.Close()
+			_ = db.Close()
 			if attempt == maxAttempts {
 				return nil, fmt.Errorf("postgres ping after %d attempts: %w", maxAttempts, err)
 			}
@@ -88,7 +88,7 @@ func (r *PostgresJobRepository) IncrementAttempts(ctx context.Context, jobID str
 }
 
 func (r *PostgresJobRepository) Close() error {
-	r.stmtUpdateStatus.Close()
-	r.stmtIncrAttempts.Close()
+	_ = r.stmtUpdateStatus.Close()
+	_ = r.stmtIncrAttempts.Close()
 	return r.db.Close()
 }

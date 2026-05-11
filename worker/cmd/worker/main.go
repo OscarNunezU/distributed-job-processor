@@ -61,14 +61,22 @@ func main() {
 		log.Error("failed to connect to postgres", "error", err)
 		panic(err)
 	}
-	defer repo.Close()
+	defer func() {
+		if err := repo.Close(); err != nil {
+			log.Error("failed to close repo", "error", err)
+		}
+	}()
 
 	consumer, err := queue.NewRabbitMQConsumer(cfg.RabbitMQURL, log)
 	if err != nil {
 		log.Error("failed to connect to rabbitmq", "error", err)
 		panic(err)
 	}
-	defer consumer.Close()
+	defer func() {
+		if err := consumer.Close(); err != nil {
+			log.Error("failed to close consumer", "error", err)
+		}
+	}()
 
 	// Metrics
 	promReg := prometheus.NewRegistry()
