@@ -37,7 +37,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// OTel tracer — optional, worker continues without it if Tempo is unavailable.
+	// W3C trace context propagation is always enabled so trace IDs from the API
+	// appear in worker logs even when no Tempo exporter is configured.
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+
+	// OTel exporter — optional, worker continues without it if Tempo is unavailable.
 	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" {
 		shutdown, err := initTracer(ctx)
 		if err != nil {
@@ -115,10 +122,6 @@ func initTracer(ctx context.Context) (func(context.Context) error, error) {
 	)
 
 	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-		propagation.TraceContext{},
-		propagation.Baggage{},
-	))
 
 	return tp.Shutdown, nil
 }

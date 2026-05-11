@@ -75,16 +75,20 @@ func (wp *WorkerPool) process(ctx context.Context, msg domain.JobMessage, consum
 	ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(msg.TraceHeaders))
 
 	job := msg.Job
-	traceID := trace.SpanFromContext(ctx).SpanContext().TraceID().String()
-	log := wp.log.With("job_id", job.ID, "job_type", job.Type, "attempt", job.Attempts+1, "trace_id", traceID)
-
 	jobCtx, cancel := context.WithTimeout(ctx, wp.timeout)
 	defer cancel()
 
-	if err := wp.repo.IncrementAttempts(jobCtx, job.ID); err != nil {
+	newAttempts, err := wp.repo.IncrementAttempts(jobCtx, job.ID)
+	if err != nil {
+		newAttempts = job.Attempts + 1
+	}
+	job.Attempts = newAttempts
+
+	traceID := trace.SpanFromContext(ctx).SpanContext().TraceID().String()
+	log := wp.log.With("job_id", job.ID, "job_type", job.Type, "attempt", job.Attempts, "trace_id", traceID)
+	if err != nil {
 		log.Error("failed to increment attempts", "error", err)
 	}
-	job.Attempts++
 
 	if err := wp.repo.UpdateStatus(jobCtx, job.ID, domain.StatusProcessing, ""); err != nil {
 		log.Error("failed to update status to processing", "error", err)
