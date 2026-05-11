@@ -18,6 +18,7 @@ import (
 // --- mocks ---
 
 type mockRepo struct {
+	attempts     int32 // tracks DB attempts count; initialize to match job's starting attempts
 	updateCalled int32
 	incrCalled   int32
 }
@@ -27,9 +28,9 @@ func (m *mockRepo) UpdateStatus(_ context.Context, _ string, _ domain.JobStatus,
 	return nil
 }
 
-func (m *mockRepo) IncrementAttempts(_ context.Context, _ string) error {
+func (m *mockRepo) IncrementAttempts(_ context.Context, _ string) (int, error) {
 	atomic.AddInt32(&m.incrCalled, 1)
-	return nil
+	return int(atomic.AddInt32(&m.attempts, 1)), nil
 }
 
 type mockConsumer struct {
@@ -112,7 +113,7 @@ func TestWorkerPool_SuccessfulJob(t *testing.T) {
 func TestWorkerPool_FailedJobNoRetry(t *testing.T) {
 	reg := registry.New()
 	reg.Register("email", &failHandler{})
-	repo := &mockRepo{}
+	repo := &mockRepo{attempts: 3} // pre-seed so IncrementAttempts returns 4 >= maxAttempts(3)
 	consumer := &mockConsumer{}
 	wp := newPool(reg, repo)
 

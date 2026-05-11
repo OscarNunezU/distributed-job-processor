@@ -29,7 +29,7 @@ func NewRabbitMQConsumer(url string, log *logger.Logger) (*RabbitMQConsumer, err
 		return nil, err
 	}
 	if err := declareTopology(ch); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 	return &RabbitMQConsumer{conn: conn, channel: ch, log: log}, nil
@@ -55,12 +55,12 @@ func dialWithRetry(url string, log *logger.Logger) (*amqp.Connection, *amqp.Chan
 
 		ch, err := conn.Channel()
 		if err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, nil, fmt.Errorf("rabbitmq channel: %w", err)
 		}
 
 		if err := ch.Qos(10, 0, false); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, nil, fmt.Errorf("rabbitmq qos: %w", err)
 		}
 
@@ -112,10 +112,17 @@ func (c *RabbitMQConsumer) Consume(_ context.Context) (<-chan domain.JobMessage,
 					_ = d.Nack(false, false)
 					continue
 				}
+				traceHeaders := make(map[string]string, len(d.Headers))
+				for k, v := range d.Headers {
+					if s, ok := v.(string); ok {
+						traceHeaders[k] = s
+					}
+				}
 				out <- domain.JobMessage{
-					Job:         &job,
-					RawBody:     d.Body,
-					DeliveryTag: d.DeliveryTag,
+					Job:          &job,
+					RawBody:      d.Body,
+					DeliveryTag:  d.DeliveryTag,
+					TraceHeaders: traceHeaders,
 				}
 			case err := <-connClose:
 				if err != nil {

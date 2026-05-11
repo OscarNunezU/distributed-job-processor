@@ -5,7 +5,10 @@ import "context"
 // JobRepository is the port for persisting job state.
 type JobRepository interface {
 	UpdateStatus(ctx context.Context, jobID string, status JobStatus, errMsg string) error
-	IncrementAttempts(ctx context.Context, jobID string) error
+	// IncrementAttempts bumps the DB counter and returns the new value so the
+	// worker can evaluate CanRetry() against the authoritative count, not the
+	// stale value embedded in the queue message.
+	IncrementAttempts(ctx context.Context, jobID string) (int, error)
 }
 
 // MessageConsumer is the port for consuming jobs from a broker.
@@ -27,4 +30,7 @@ type JobMessage struct {
 	RawBody []byte
 	// DeliveryTag is broker-specific metadata needed to ack/nack.
 	DeliveryTag uint64
+	// TraceHeaders carries W3C trace context extracted from the broker message
+	// so the worker can continue the distributed trace started by the API.
+	TraceHeaders map[string]string
 }

@@ -4,10 +4,18 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+
 	"github.com/OscarNunezU/distributed-job-processor/worker/internal/application/handlers"
 	"github.com/OscarNunezU/distributed-job-processor/worker/internal/application/registry"
 	"github.com/OscarNunezU/distributed-job-processor/worker/internal/infrastructure/logger"
@@ -26,20 +34,49 @@ func main() {
 		panic(err)
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// W3C trace context propagation is always enabled so trace IDs from the API
+	// appear in worker logs even when no Tempo exporter is configured.
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+
+	// OTel exporter — optional, worker continues without it if Tempo is unavailable.
+	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" {
+		shutdown, err := initTracer(ctx)
+		if err != nil {
+			log.Warn("tracing unavailable", "error", err)
+		} else {
+			defer shutdown(ctx) //nolint:errcheck
+			log.Info("tracing enabled", "endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+		}
+	}
+
 	// Infrastructure
 	repo, err := repository.NewPostgresJobRepository(cfg.PostgresDSN)
 	if err != nil {
 		log.Error("failed to connect to postgres", "error", err)
 		panic(err)
 	}
-	defer repo.Close()
+	defer func() {
+		if err := repo.Close(); err != nil {
+			log.Error("failed to close repo", "error", err)
+		}
+	}()
 
 	consumer, err := queue.NewRabbitMQConsumer(cfg.RabbitMQURL, log)
 	if err != nil {
 		log.Error("failed to connect to rabbitmq", "error", err)
 		panic(err)
 	}
-	defer consumer.Close()
+	defer func() {
+		if err := consumer.Close(); err != nil {
+			log.Error("failed to close consumer", "error", err)
+		}
+	}()
 
 	// Metrics
 	promReg := prometheus.NewRegistry()
@@ -47,15 +84,12 @@ func main() {
 
 	// Handler registry — add new job types here
 	reg := registry.New()
-	reg.Register("email", handlers.NewEmailHandler(log))
-	reg.Register("report", handlers.NewReportHandler(log))
-	reg.Register("data-processing", handlers.NewDataProcessingHandler(log))
+	reg.Register("email", handlers.NewInstrumented(handlers.NewEmailHandler(log), "email", m))
+	reg.Register("report", handlers.NewInstrumented(handlers.NewReportHandler(log), "report", m))
+	reg.Register("data-processing", handlers.NewInstrumented(handlers.NewDataProcessingHandler(log), "data-processing", m))
 
 	// Worker pool
 	wp := pool.New(cfg.Concurrency, cfg.JobTimeout, reg, repo, m, log)
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	// Metrics server
 	mux := http.NewServeMux()
@@ -79,4 +113,23 @@ func main() {
 
 	wp.Run(ctx, messages, consumer)
 	log.Info("worker stopped gracefully")
+}
+
+func initTracer(ctx context.Context) (func(context.Context) error, error) {
+	exporter, err := otlptracehttp.New(ctx) // reads OTEL_EXPORTER_OTLP_ENDPOINT
+	if err != nil {
+		return nil, fmt.Errorf("otlp exporter: %w", err)
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(resource.NewWithAttributes(
+			semconv.SchemaURL,
+			semconv.ServiceName(getEnv("OTEL_SERVICE_NAME", "worker")),
+		)),
+	)
+
+	otel.SetTracerProvider(tp)
+
+	return tp.Shutdown, nil
 }
