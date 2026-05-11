@@ -1,6 +1,6 @@
 # Distributed Job Processor
 
-A production-ready distributed system for asynchronous job processing using NestJS, Go, RabbitMQ, and PostgreSQL. Designed for extensibility and horizontal scalability.
+A production-ready distributed system for asynchronous job processing using NestJS, Go, RabbitMQ, and PostgreSQL. Deployable via Docker Compose (local dev) or Kubernetes with KEDA autoscaling (staging/production). Designed for extensibility and horizontal scalability.
 
 ## Architecture Overview
 
@@ -17,12 +17,16 @@ A production-ready distributed system for asynchronous job processing using Nest
                                    │                             │ /metrics
                         READ PATH  │                             ▼
 ┌─────────────┐  gRPC   ┌──────────┴──────┐           ┌──────────────────┐
-│  Internal   │────────▶│ query-service   │           │  Prometheus      │
-│  Service    │         │    (Go gRPC)    │           │  Grafana         │
-└─────────────┘         └─────────────────┘           └──────────────────┘
+│  Internal   │────────▶│ query-service   │           │  Prometheus       │
+│  Service    │         │    (Go gRPC)    │           │  Grafana          │
+└─────────────┘         └─────────────────┘           │  Tempo (traces)  │
+                                                       │  Loki (logs)     │
+                                                       └──────────────────┘
 ```
 
 Write path: HTTP → RabbitMQ (async, via API). Read path: gRPC → PostgreSQL (sync, via query-service). Both paths share the same database; neither path depends on the other.
+
+Distributed traces are propagated via W3C `traceparent` headers across the API→RabbitMQ→Worker boundary using OpenTelemetry, enabling end-to-end trace correlation in Grafana Tempo.
 
 ### Job Lifecycle
 
@@ -62,24 +66,35 @@ distributed-job-processor/
 │   └── internal/
 │       ├── repository/           # PostgreSQL read-only repository
 │       └── server/               # gRPC server implementation
+├── k8s/                          # Kubernetes manifests
+│   ├── namespace.yaml
+│   ├── secrets/                  # app-secrets (postgres, rabbitmq, api-key)
+│   ├── postgres/                 # StatefulSet + headless Service
+│   ├── rabbitmq/                 # StatefulSet + headless Service
+│   ├── api/                      # Deployment + Service + Ingress + HPA
+│   ├── worker/                   # Deployment + KEDA ScaledObject
+│   └── query-service/            # Deployment + Service
 ├── monitoring/
 │   ├── prometheus/               # Scrape config
-│   └── grafana/                  # Datasources + pre-built dashboard
-├── Makefile                      # make proto — regenerates Go code from job.proto
+│   ├── grafana/                  # Datasources + pre-built dashboard
+│   ├── tempo/                    # Distributed tracing backend (OTLP)
+│   ├── loki/                     # Log aggregation
+│   └── promtail/                 # Log collector (extracts trace_id as label)
+├── Makefile                      # proto, cluster-create, images-build, deploy
 ├── .github/workflows/            # CI: lint + test + build + docker
-└── docs/adr/                     # Architecture Decision Records
+└── docs/
+    ├── adr/                      # Architecture Decision Records
+    └── postman/                  # Postman collection
 ```
 
 ## Quick Start
 
-### Prerequisites
+### Option A — Docker Compose (local dev)
 
-- Docker + Docker Compose
-
-### Run
+**Prerequisites:** Docker + Docker Compose
 
 ```bash
-cp .env.example .env   # adjust values as needed
+cp .env.example .env
 docker compose up --build
 ```
 
@@ -90,6 +105,41 @@ docker compose up --build
 | RabbitMQ UI       | http://localhost:15672 (guest / guest) |
 | Prometheus        | http://localhost:9091                  |
 | Grafana           | http://localhost:3001 (admin / admin)  |
+| Tempo (traces)    | http://localhost:3200                  |
+
+### Option B — Kubernetes (k3d local cluster)
+
+**Prerequisites:** Docker, [k3d](https://k3d.io), kubectl, helm
+
+```bash
+# 1. Create cluster + registry
+make cluster-create
+
+# 2. Build and push images to local registry
+make images-build images-push
+
+# 3. Deploy all manifests
+make deploy
+
+# 4. Port-forward for local access
+make port-forward
+```
+
+| Service           | URL / Address              |
+|-------------------|----------------------------|
+| API               | http://127.0.0.1:3000      |
+| Query Service     | 127.0.0.1:50051 (gRPC)    |
+
+The worker scales automatically from 1 to 10 replicas based on RabbitMQ queue depth via KEDA (1 replica per 10 queued messages).
+
+```bash
+# Check cluster status
+make status
+
+# Tear down
+make undeploy
+make cluster-delete
+```
 
 ## Authentication
 
@@ -190,10 +240,10 @@ Once a job is created its ID can be queried directly through the gRPC query-serv
 grpcurl -plaintext localhost:50051 list
 
 # get a specific job
-grpcurl -plaintext -d '{"id": "<job-id>"}' localhost:50051 job.JobService/GetJob
+grpcurl -plaintext -d '{"id": "<job-id>"}' localhost:50051 job.v1.JobService/GetJob
 
 # list jobs with pagination
-grpcurl -plaintext -d '{"limit": 10, "offset": 0}' localhost:50051 job.JobService/ListJobs
+grpcurl -plaintext -d '{"limit": 10, "offset": 0}' localhost:50051 job.v1.JobService/ListJobs
 ```
 
 Expected `GetJob` response:
@@ -331,22 +381,26 @@ No other changes required — the architecture is closed for modification, open 
 
 ### API environment variables
 
-| Variable       | Description                        | Default    |
-|----------------|------------------------------------|------------|
-| `PORT`         | HTTP port                          | `3000`     |
-| `API_KEY`      | API key required in X-API-Key header | —        |
-| `POSTGRES_DSN` | PostgreSQL connection URL          | required   |
-| `RABBITMQ_URL` | RabbitMQ AMQP URL                  | required   |
+| Variable                       | Description                          | Default  |
+|--------------------------------|--------------------------------------|----------|
+| `PORT`                         | HTTP port                            | `3000`   |
+| `API_KEY`                      | API key required in X-API-Key header | —        |
+| `POSTGRES_DSN`                 | PostgreSQL connection URL            | required |
+| `RABBITMQ_URL`                 | RabbitMQ AMQP URL                    | required |
+| `OTEL_SERVICE_NAME`            | Service name in traces               | `api`    |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`  | Tempo OTLP HTTP endpoint             | —        |
 
 ### Worker environment variables
 
-| Variable              | Description                   | Default  |
-|-----------------------|-------------------------------|----------|
-| `POSTGRES_DSN`        | PostgreSQL connection URL     | required |
-| `RABBITMQ_URL`        | RabbitMQ AMQP URL             | required |
-| `WORKER_CONCURRENCY`  | Number of parallel goroutines | `5`      |
-| `JOB_TIMEOUT_SECONDS` | Max processing time per job   | `30`     |
-| `METRICS_PORT`        | Prometheus metrics port       | `9090`   |
+| Variable                       | Description                   | Default  |
+|--------------------------------|-------------------------------|----------|
+| `POSTGRES_DSN`                 | PostgreSQL connection URL     | required |
+| `RABBITMQ_URL`                 | RabbitMQ AMQP URL             | required |
+| `WORKER_CONCURRENCY`           | Number of parallel goroutines | `5`      |
+| `JOB_TIMEOUT_SECONDS`          | Max processing time per job   | `30`     |
+| `METRICS_PORT`                 | Prometheus metrics port       | `9090`   |
+| `OTEL_SERVICE_NAME`            | Service name in traces        | `worker` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`  | Tempo OTLP HTTP endpoint      | —        |
 
 ### Query Service environment variables
 
@@ -357,6 +411,8 @@ No other changes required — the architecture is closed for modification, open 
 
 ## Observability
 
+### Metrics (Prometheus + Grafana)
+
 The worker exposes Prometheus metrics at `:9090/metrics`:
 
 | Metric                        | Type      | Description                    |
@@ -366,7 +422,21 @@ The worker exposes Prometheus metrics at `:9090/metrics`:
 | `worker_job_duration_seconds` | Histogram | Processing duration, by type   |
 | `worker_active_jobs`          | Gauge     | Currently processing jobs      |
 
-Grafana dashboard is auto-provisioned at startup.
+Grafana dashboard is auto-provisioned at startup (Docker Compose only).
+
+### Distributed Tracing (OpenTelemetry + Tempo)
+
+Both the API and worker are instrumented with OpenTelemetry. Traces are exported to Tempo via OTLP HTTP.
+
+The W3C `traceparent` header is injected into AMQP message headers when the API publishes a job. The worker extracts it and continues the same trace, so a single trace spans the full HTTP → queue → worker flow.
+
+Worker logs include `trace_id` for correlation with Loki:
+
+```json
+{"level":"INFO","msg":"job completed","job_id":"...","trace_id":"41d1423e786b75983feda80c3b2fc4f9"}
+```
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` to enable trace export. If unset, W3C context propagation still works (trace IDs appear in logs) but spans are not exported.
 
 ## gRPC Reference
 
