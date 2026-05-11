@@ -11,7 +11,7 @@ A production-ready distributed system for asynchronous job processing using Nest
 └─────────────┘           └────────┬────────┘          └────────┬─────────┘
                                    │ SQL INSERT                  │ consume
                                    ▼                             ▼
-                          ┌─────────────────┐          ┌──────────────────┐
+                          ┌─────────────────┐           ┌──────────────────┐
                           │   PostgreSQL    │◀──────────│  Worker (Go)     │
                           └────────┬────────┘ SQL UPDATE└────────┬─────────┘
                                    │                             │ /metrics
