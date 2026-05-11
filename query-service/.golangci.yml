@@ -1,0 +1,12 @@
+run:
+  go: "1.24"
+  timeout: 3m
+
+linters:
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - unused
+    - gosimple
+    - ineffassign
