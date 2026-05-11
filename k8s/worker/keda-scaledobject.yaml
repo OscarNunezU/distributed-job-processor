@@ -1,0 +1,19 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-scaler
+  namespace: job-processor
+spec:
+  scaleTargetRef:
+    name: worker
+  pollingInterval: 5
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  cooldownPeriod: 30
+  triggers:
+    - type: rabbitmq
+      metadata:
+        host: amqp://guest:guest@rabbitmq.job-processor.svc.cluster.local:5672
+        queueName: jobs
+        mode: QueueLength
+        value: "10"  # 1 réplica adicional por cada 10 mensajes en cola

@@ -7,9 +7,13 @@ coverage/
 
 # Go
 worker/bin/
+worker/worker
 *.exe
 *.test
 *.out
+
+# TypeScript build artifacts
+*.tsbuildinfo
 
 # Docker
 .docker/
