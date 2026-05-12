@@ -12,8 +12,9 @@ spec:
   cooldownPeriod: 30
   triggers:
     - type: rabbitmq
+      authenticationRef:
+        name: rabbitmq-trigger-auth
       metadata:
-        host: amqp://guest:guest@rabbitmq.job-processor.svc.cluster.local:5672
         queueName: jobs
         mode: QueueLength
-        value: "10"  # 1 réplica adicional por cada 10 mensajes en cola
+        value: "10"

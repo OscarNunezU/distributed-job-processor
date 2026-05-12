@@ -6,6 +6,7 @@ import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { databaseConfig } from './shared/config/database.config';
 import { JobsModule } from './jobs/jobs.module';
 import { ApiKeyGuard } from './shared/guards/api-key.guard';
+import { HealthController } from './shared/controllers/health.controller';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { ApiKeyGuard } from './shared/guards/api-key.guard';
     }),
     JobsModule,
   ],
+  controllers: [HealthController],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: ApiKeyGuard },

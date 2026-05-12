@@ -8,6 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import * as amqp from 'amqplib';
 import CircuitBreaker from 'opossum';
+import { context, propagation } from '@opentelemetry/api';
 import { Job } from '../../domain/job.entity';
 import { MessageBrokerPort } from '../../domain/message-broker.port';
 
@@ -89,10 +90,13 @@ export class RabbitMQBroker implements MessageBrokerPort, OnModuleInit, OnModule
   // Kept as a separate method so the breaker can bind to it cleanly.
   private async sendToQueue(job: Job): Promise<void> {
     const content = Buffer.from(JSON.stringify(job));
+    const headers: Record<string, string> = {};
+    propagation.inject(context.active(), headers);
     const sent = this.channel.sendToQueue(QUEUE_NAME, content, {
       persistent: true,
       messageId: job.id,
       contentType: 'application/json',
+      headers,
     });
     if (!sent) {
       throw new Error(`Job ${job.id} — channel write buffer full`);

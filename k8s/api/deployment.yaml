@@ -68,19 +68,13 @@ spec:
               memory: "256Mi"
           readinessProbe:
             httpGet:
-              path: /jobs
+              path: /health
               port: 3000
-              httpHeaders:
-                - name: X-API-Key
-                  value: test-api-key
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /jobs
+              path: /health
               port: 3000
-              httpHeaders:
-                - name: X-API-Key
-                  value: test-api-key
             initialDelaySeconds: 20
             periodSeconds: 30
